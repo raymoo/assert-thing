@@ -2,6 +2,8 @@
 module Assert.Lang ( Expr(..)
                    , ExprF(..)
                    , BinOp(..)
+                   , CompiledBinOp(..)
+                   , compileBinOp
                    , Variable(..)
                    , Env
                    , emptyEnv
@@ -57,8 +59,12 @@ instance Recursive (Expr u) where
 
 data BinOp = Add
            | Sub
+           | Lt
            | Leq
+           | Gt
+           | Geq
            | Eq
+           | Neq
            | And
            | Or
   deriving (Show)
@@ -70,8 +76,12 @@ data CompiledBinOp = IntOp (Integer -> Integer -> Integer)
 compileBinOp :: BinOp -> CompiledBinOp
 compileBinOp Add = IntOp (+)
 compileBinOp Sub = IntOp (-)
+compileBinOp Lt  = CompOp (<)
 compileBinOp Leq = CompOp (<=)
+compileBinOp Gt  = CompOp (>)
+compileBinOp Geq = CompOp (>=)
 compileBinOp Eq  = CompOp (==)
+compileBinOp Neq = CompOp (/=)
 compileBinOp And = BoolOp (&&)
 compileBinOp Or  = BoolOp (||)
 

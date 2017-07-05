@@ -68,7 +68,11 @@ opP = asum . map makeP $ ops
         ops = [ ("+" , Add)
               , ("-" , Sub)
               , ("<=", Leq)
+              , ("<" , Lt)
+              , (">=", Geq)
+              , (">" , Gt)
               , ("==", Eq)
+              , ("/=", Neq)
               , ("&&", And)
               , ("||", Or)
               ]

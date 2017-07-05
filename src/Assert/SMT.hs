@@ -9,6 +9,7 @@ import qualified SimpleSMT as SMT
 
 import Data.Functor.Foldable
 
+import Control.Applicative
 import Data.Foldable (for_)
 
 newtype Fresh a = Fresh { unFresh :: (Int -> (Int, a)) }
@@ -75,60 +76,113 @@ addUnknowns solver n = do
 
 opType :: BinOp -> SExpr
 opType op =
-  case op of
-    Add -> SMT.tInt
-    Sub -> SMT.tInt
-    Leq -> SMT.tBool
-    Eq  -> SMT.tBool
-    And -> SMT.tBool
-    Or  -> SMT.tBool
+  case compileBinOp op of
+    IntOp _  -> SMT.tInt
+    CompOp _ -> SMT.tBool
+    BoolOp _ -> SMT.tBool
 
 checkExpr :: Expr u -> IO (Maybe [(String, SMT.Value)])
 checkExpr e = do
   solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< Just <$> SMT.newLogger 0
   unknownNames <- addUnknowns solver unknownCount
-  _ <- snd . cata (checkExprF solver) eFinal $ emptyEnv
-  checkRes <- SMT.check solver
-  case (unknownNames, checkRes) of
-    ([], SMT.Sat)       -> pure (Just [])
-    (_,  SMT.Sat) -> Just <$> SMT.getConsts solver unknownNames
-    _             -> pure Nothing
+  eResult <- snd . cata (checkExprF solver unknownNames) eFinal $ emptyEnv
+  pure $
+    case eResult of
+      Left assgns -> Just assgns
+      _           -> Nothing
   where (unknownCount, eNumbered) = renumberExpr e
         eFinal = uniquifyExpr eNumbered
+
+check :: Solver -> [String] -> IO (Maybe [(String, SMT.Value)])
+check solver names = do
+  checkRes <- SMT.check solver
+  case (names, checkRes) of
+    ([], SMT.Sat)       -> pure (Just [])
+    (_,  SMT.Sat) -> Just <$> SMT.getConsts solver names
+    _             -> pure Nothing
 
 applyOp :: BinOp -> SExpr -> SExpr -> SExpr
 applyOp Add = SMT.add
 applyOp Sub = SMT.sub
+applyOp Lt  = SMT.lt
 applyOp Leq = SMT.leq
+applyOp Gt  = SMT.gt
+applyOp Geq = SMT.geq
 applyOp Eq  = SMT.eq
+applyOp Neq = (SMT.not .) . SMT.eq
 applyOp And = SMT.and
 applyOp Or  = SMT.or
 
 checkExprF :: Solver
-           -> ExprF Int (Env SExpr -> (SExpr, IO SExpr))
+           -> [String]
+           -> ExprF Int (Env SExpr -> (SExpr, IO (Either [(String, SMT.Value)] SExpr)))
            -> Env SExpr
-           -> (SExpr, IO SExpr)
-checkExprF _ (ConstIntF x)     _   = (SMT.tInt, pure (SMT.int x))
-checkExprF _ (ConstBoolF p)    _   = (SMT.tBool, pure (SMT.bool p))
-checkExprF _ (BinOpF ev1 op ev2) env = (opType op, applyOp op <$> e1 <*> e2)
+           -> (SExpr, IO (Either [(String, SMT.Value)] SExpr))
+checkExprF _ _ (ConstIntF x)     _   = (SMT.tInt, puree (SMT.int x))
+checkExprF _ _ (ConstBoolF p)    _   = (SMT.tBool, puree (SMT.bool p))
+checkExprF _ _ (BinOpF ev1 op ev2) env = (opType op, applyOp op <<$>> e1 <<*>> e2)
   where (_, e1) = ev1 env
         (_, e2) = ev2 env
-checkExprF _ (UnknownIntF u)   _   =
-  (SMT.tInt, pure . SMT.Atom . makeIdent "?" . fromIntegral $ u)
-checkExprF _ (VarF v@(Variable varName)) env = (lookupEnvU env v, pure . SMT.Atom $ varName)
-checkExprF solver (LetF v@(Variable varName) ev1 ev2) env = (t2, action)
+checkExprF _ _ (UnknownIntF u)   _   =
+  (SMT.tInt, puree . SMT.Atom . makeIdent "?" . fromIntegral $ u)
+checkExprF _ _ (VarF v@(Variable varName)) env = (lookupEnvU env v, puree . SMT.Atom $ varName)
+checkExprF solver _ (LetF v@(Variable varName) ev1 ev2) env = (t2, action)
   where (t1, e1) = ev1 env
         (t2, e2) = ev2 (bindEnv v t1 env)
         action = do
-          varDef <- e1
-          _ <- SMT.define solver varName t1 varDef
-          e2
-checkExprF solver (AssertF ev) env = (SMT.tInt, action)
+          eVarDef <- e1
+          case eVarDef of
+            Left assgns -> pure (Left assgns)
+            Right varDef -> do
+              _ <- SMT.define solver varName t1 varDef
+              e2
+checkExprF solver names (AssertF ev) env = (SMT.tInt, action)
   where action = do
-          expr <- snd (ev env)
-          SMT.assert solver (SMT.not expr)
-          pure (SMT.int 0)
-checkExprF _ (IteF ev1 ev2 ev3) env = (t2, SMT.ite <$> e1 <*> e2 <*> e3)
+          eExpr <- snd (ev env)
+          case eExpr of
+            Left assgns -> pure (Left assgns)
+            Right expr -> do
+              SMT.push solver
+              SMT.assert solver (SMT.not expr)
+              mAssgns <- check solver names
+              SMT.pop solver
+              pure $ maybeToLeft mAssgns (SMT.int 0)
+checkExprF solver _ (IteF ev1 ev2 ev3) env = (t2, action)
   where (_,  e1) = ev1 env
         (t2, e2) = ev2 env
         (_,  e3) = ev3 env
+        action = do
+          eCond <- e1
+          case eCond of
+            Left assgns -> pure . Left $  assgns
+            Right cond -> do
+              -- Then clause: condition is true
+              SMT.push solver
+              SMT.assert solver cond
+              eThen <- e2
+              SMT.pop solver
+
+              -- Else clause: condition is false
+              SMT.push solver
+              SMT.assert solver (SMT.not cond)
+              eElse <- e3
+              SMT.pop solver
+
+              pure $ SMT.ite cond <$> eThen <*> eElse
+        
+
+maybeToLeft :: Maybe a -> b -> Either a b
+maybeToLeft (Just a) _ = Left a
+maybeToLeft Nothing b  = Right b
+
+puree :: (Applicative f, Applicative g) => a -> f (g a)
+puree = pure . pure
+
+(<<$>>) :: (Functor f, Functor g) => (a -> b) -> f (g a) -> f (g b)
+(<<$>>) = fmap . fmap
+infixl 4 <<$>>
+
+(<<*>>) :: (Applicative f, Applicative g) => f (g (a -> b)) -> f (g a) -> f (g b)
+(<<*>>) = liftA2 (<*>)
+infixl 4 <<*>>
+

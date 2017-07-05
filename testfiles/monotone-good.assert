@@ -1,8 +1,6 @@
 let x = ? in
 let y = ? in
-  assert (if (0 <= y)
-          then
-            (x <= (x + y)) && ((x - y) <= x)
-	  else
-	    true
-	 )
+  if (0 < y)
+  then assert ((x < (x + y)) && ((x - y) < x))
+  else assert ((x >= (x + y)) && ((x - y) >= x))
+  
