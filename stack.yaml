@@ -1,0 +1,9 @@
+flags: {}
+extra-package-dbs: []
+packages:
+- '.'
+extra-deps:
+- atto-lisp-0.2.2.2
+- smtlib2-1.0
+- smtlib2-pipe-1.0
+resolver: lts-8.21
