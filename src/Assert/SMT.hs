@@ -138,7 +138,7 @@ getVarType var = asks (\env -> lookupEnvU env var)
 
 checkExpr :: Expr u -> IO [([(String, SMT.Value)], Caret)]
 checkExpr e = do
-  solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< pure Nothing
+  solver <- SMT.newSolver "z3" ["-smt2","-in"] Nothing
   unknownNames <- addUnknowns solver unknownCount
   let (_, checks) = evalRWS (cata checkExprF eFinal) emptyEnv ()
       checkOne c@(Check _ r) = (fmap.fmap) (, r) . check solver unknownNames $ c
