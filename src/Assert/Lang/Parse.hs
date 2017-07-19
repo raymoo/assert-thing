@@ -91,7 +91,7 @@ letP = reserve "let" *>
   (Let . Variable <$> ident <*> (P.symbol "=" *> exprP) <*> (reserve "in" *> exprP))
 
 assertP :: Parser (Expr ())
-assertP = reserve "assert" *> (Assert <$> exprP)
+assertP = reserve "assert" *> (Assert <$> P.rend <*> exprP)
 
 ifP :: Parser (Expr ())
 ifP = reserve "if" *> (Ite <$> exprP <*> (reserve "then" *> exprP) <*> (reserve "else" *> exprP))

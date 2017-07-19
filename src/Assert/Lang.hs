@@ -18,6 +18,8 @@ module Assert.Lang ( Expr(..)
 
 import Data.Functor.Foldable
 
+import Text.Trifecta.Rendering (Rendering)
+
 import Data.Hashable
 
 import Data.HashMap.Strict (HashMap)
@@ -31,7 +33,7 @@ data Expr u = ConstInt Integer
             | UnknownInt u
             | Var Variable
             | Let Variable (Expr u) (Expr u)
-            | Assert (Expr u)
+            | Assert Rendering (Expr u)
             | Ite (Expr u) (Expr u) (Expr u)
   deriving (Show, Functor, Foldable, Traversable)
 
@@ -41,7 +43,7 @@ data ExprF u a = ConstIntF Integer
                | UnknownIntF u
                | VarF Variable
                | LetF Variable a a
-               | AssertF a
+               | AssertF Rendering a
                | IteF a a a
   deriving (Show, Functor)
 
@@ -54,7 +56,7 @@ instance Recursive (Expr u) where
   project (UnknownInt u)   = UnknownIntF u
   project (Var v)          = VarF v
   project (Let v e1 e2)    = LetF v e1 e2
-  project (Assert e)       = AssertF e
+  project (Assert r e)     = AssertF r e
   project (Ite e1 e2 e3)   = IteF e1 e2 e3
 
 data BinOp = Add
@@ -131,7 +133,7 @@ evalOne (UnknownIntF u)     _   = IntVal u
 evalOne (VarF v)            env = lookupEnvU env v
 evalOne (LetF v ev1 ev2)    env = ev2 innerEnv
   where innerEnv = bindEnv v (ev1 env) env
-evalOne (AssertF _)         _   = IntVal 0
+evalOne (AssertF _ _)         _   = IntVal 0
 evalOne (IteF ev1 ev2 ev3)  env =
   case ev1 env of
     BoolVal True  -> ev2 env

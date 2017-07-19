@@ -60,7 +60,7 @@ uniquifyExprF (LetF var ev1 ev2) bindings freshes =
       bindings' = bindEnv var newVar bindings
       (freshes''', e2) = ev2 bindings' freshes''
   in (freshes''', Let newVar e1 e2)
-uniquifyExprF (AssertF ev) bindings freshes = Assert <$> ev bindings freshes
+uniquifyExprF (AssertF r ev) bindings freshes = Assert r <$> ev bindings freshes
 uniquifyExprF (IteF ev1 ev2 ev3) bindings freshes =
   let (freshes', e1) = ev1 bindings freshes
       (freshes'', e2) = ev2 bindings freshes'
@@ -175,7 +175,7 @@ checkExprF (VarF v@(Variable varName)) = do
 checkExprF (LetF v@(Variable varName) ev1 ev2) = do
   (t1, e1) <- ev1
   withVar v t1 e1 ev2
-checkExprF (AssertF ev) = do
+checkExprF (AssertF _ ev) = do
   (_, e) <- ev
   tell $ [Check (Assume (SMT.not e) :)]
   pure (SMT.tInt, SMT.int 0)
