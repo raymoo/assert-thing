@@ -23,6 +23,7 @@ main = do
     Just expr -> do
       failures <- checkExpr expr
       traverse_ printFailure failures
+      if null failures then putStrLn "All good" else pure ()
 
 printFailure :: ([(String, Value)], Caret) -> IO ()
 printFailure (assgns, location) = do
