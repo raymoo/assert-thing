@@ -4,8 +4,14 @@ module Main where
 import Assert.Lang.Parse
 import Assert.SMT
 
+import SimpleSMT (Value)
+
+import Text.PrettyPrint.ANSI.Leijen (pretty, putDoc)
+
+import Text.Trifecta (Caret)
 import qualified Text.Trifecta as P
 
+import Data.Foldable (traverse_)
 import System.Environment
 
 main :: IO ()
@@ -15,9 +21,13 @@ main = do
   case mExpr of
     Nothing -> putStrLn "Parsing failed"
     Just expr -> do
-      results <- checkExpr expr
-      case results of
-        Nothing -> putStrLn "All good!"
-        Just assignments -> do
-          putStrLn "Assertion can fail with assignments: "
-          print assignments
+      failures <- checkExpr expr
+      traverse_ printFailure failures
+
+printFailure :: ([(String, Value)], Caret) -> IO ()
+printFailure (assgns, location) = do
+  putStrLn "\nFailed assertion:"
+  putDoc . pretty . P.render $ location
+  putStrLn ""
+  putStrLn "Assertion can fail with assignments: "
+  print assgns

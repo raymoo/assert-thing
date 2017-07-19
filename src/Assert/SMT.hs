@@ -1,7 +1,7 @@
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds, TupleSections #-}
 module Assert.SMT ( checkExpr
                   , Check(..)
-                  , SMTM(..)
+                  , SMTM
                   , Command
                   ) where
 
@@ -11,6 +11,9 @@ import SimpleSMT (Solver, SExpr)
 import qualified SimpleSMT as SMT
 
 import Data.Functor.Foldable
+
+import Text.Trifecta.Rendering (Caret)
+import qualified Text.Trifecta.Rendering as R
 
 import Control.Monad.Trans.RWS.Strict
 
@@ -99,10 +102,10 @@ runCommand solver (Define (Variable s) varType varDef) = void $ SMT.define solve
 runCommand solver (Assume e) = SMT.assert solver e
 
 -- | Difflist of commands to run before checkSat
-newtype Check = Check ([Command] -> [Command])
+data Check = Check ([Command] -> [Command]) Caret
 
 check :: Solver -> [String] -> Check -> IO (Maybe [(String, SMT.Value)])
-check solver names (Check f) = do
+check solver names (Check f r) = do
   SMT.push solver
   traverse (runCommand solver) commands
   checkRes <- SMT.check solver
@@ -119,7 +122,7 @@ type SMTM a = RWS (Env SExpr) [Check] () a
 -- | Applies a functoin inside the Check constructor
 mapCheck :: (([Command] -> [Command]) -> ([Command] -> [Command]))
          -> Check -> Check
-mapCheck f (Check g) = Check (f g)
+mapCheck f (Check g r) = Check (f g) r
 
 withCondition :: SExpr -> SMTM a -> SMTM a
 withCondition cond = censor (map addCondition)
@@ -133,17 +136,14 @@ withVar var varType varDef = censor (map addDef) . local addVar
 getVarType :: Variable -> SMTM SExpr
 getVarType var = asks (\env -> lookupEnvU env var)
 
-checkExpr :: Expr u -> IO (Maybe [(String, SMT.Value)])
+checkExpr :: Expr u -> IO [([(String, SMT.Value)], Caret)]
 checkExpr e = do
-  solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< Just <$> SMT.newLogger 0
+  solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< pure Nothing
   unknownNames <- addUnknowns solver unknownCount
   let (_, checks) = evalRWS (cata checkExprF eFinal) emptyEnv ()
-      checkOne = check solver unknownNames
+      checkOne c@(Check _ r) = (fmap.fmap) (, r) . check solver unknownNames $ c
   assgnsList <- traverse checkOne checks
-  pure $
-    case catMaybes assgnsList of
-      (assgns:_) -> Just assgns
-      []         -> Nothing
+  pure $ catMaybes assgnsList
   where (unknownCount, eNumbered) = renumberExpr e
         eFinal = uniquifyExpr eNumbered
 
@@ -175,9 +175,9 @@ checkExprF (VarF v@(Variable varName)) = do
 checkExprF (LetF v@(Variable varName) ev1 ev2) = do
   (t1, e1) <- ev1
   withVar v t1 e1 ev2
-checkExprF (AssertF _ ev) = do
+checkExprF (AssertF r ev) = do
   (_, e) <- ev
-  tell $ [Check (Assume (SMT.not e) :)]
+  tell $ [Check (Assume (SMT.not e) :) r]
   pure (SMT.tInt, SMT.int 0)
 checkExprF (IteF ev1 ev2 ev3) = do
   (_,  e1) <- ev1

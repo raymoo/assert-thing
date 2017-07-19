@@ -18,7 +18,7 @@ module Assert.Lang ( Expr(..)
 
 import Data.Functor.Foldable
 
-import Text.Trifecta.Rendering (Rendering)
+import Text.Trifecta.Rendering (Caret)
 
 import Data.Hashable
 
@@ -33,7 +33,7 @@ data Expr u = ConstInt Integer
             | UnknownInt u
             | Var Variable
             | Let Variable (Expr u) (Expr u)
-            | Assert Rendering (Expr u)
+            | Assert Caret (Expr u)
             | Ite (Expr u) (Expr u) (Expr u)
   deriving (Show, Functor, Foldable, Traversable)
 
@@ -43,7 +43,7 @@ data ExprF u a = ConstIntF Integer
                | UnknownIntF u
                | VarF Variable
                | LetF Variable a a
-               | AssertF Rendering a
+               | AssertF Caret a
                | IteF a a a
   deriving (Show, Functor)
 
@@ -56,7 +56,7 @@ instance Recursive (Expr u) where
   project (UnknownInt u)   = UnknownIntF u
   project (Var v)          = VarF v
   project (Let v e1 e2)    = LetF v e1 e2
-  project (Assert r e)     = AssertF r e
+  project (Assert c e)     = AssertF c e
   project (Ite e1 e2 e3)   = IteF e1 e2 e3
 
 data BinOp = Add
