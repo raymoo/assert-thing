@@ -1,5 +1,8 @@
 {-# LANGUAGE DataKinds #-}
 module Assert.SMT ( checkExpr
+                  , Check(..)
+                  , SMTM(..)
+                  , Command
                   ) where
 
 import Assert.Lang
@@ -9,8 +12,12 @@ import qualified SimpleSMT as SMT
 
 import Data.Functor.Foldable
 
+import Control.Monad.Trans.RWS.Strict
+
 import Control.Applicative
+import Control.Monad (void)
 import Data.Foldable (for_)
+import Data.Maybe (catMaybes)
 
 newtype Fresh a = Fresh { unFresh :: (Int -> (Int, a)) }
 
@@ -81,25 +88,64 @@ opType op =
     CompOp _ -> SMT.tBool
     BoolOp _ -> SMT.tBool
 
+data Command = Declare Variable SExpr
+             | Define Variable SExpr SExpr
+             | Assume SExpr
+  deriving (Show)
+
+runCommand :: Solver -> Command -> IO ()
+runCommand solver (Declare (Variable s) e) = void $ SMT.declare solver s e
+runCommand solver (Define (Variable s) varType varDef) = void $ SMT.define solver s varType varDef
+runCommand solver (Assume e) = SMT.assert solver e
+
+-- | Difflist of commands to run before checkSat
+newtype Check = Check ([Command] -> [Command])
+
+check :: Solver -> [String] -> Check -> IO (Maybe [(String, SMT.Value)])
+check solver names (Check f) = do
+  SMT.push solver
+  traverse (runCommand solver) commands
+  checkRes <- SMT.check solver
+  result <- case (names, checkRes) of
+              ([], SMT.Sat)       -> pure (Just [])
+              (_,  SMT.Sat) -> Just <$> SMT.getConsts solver names
+              _             -> pure Nothing
+  SMT.pop solver
+  pure result
+  where commands = f []
+
+type SMTM a = RWS (Env SExpr) [Check] () a
+
+-- | Applies a functoin inside the Check constructor
+mapCheck :: (([Command] -> [Command]) -> ([Command] -> [Command]))
+         -> Check -> Check
+mapCheck f (Check g) = Check (f g)
+
+withCondition :: SExpr -> SMTM a -> SMTM a
+withCondition cond = censor (map addCondition)
+  where addCondition = mapCheck ((Assume cond :) .)
+
+withVar :: Variable -> SExpr -> SExpr -> SMTM a -> SMTM a
+withVar var varType varDef = censor (map addDef) . local addVar
+  where addDef = mapCheck ((Define var varType varDef :) .)
+        addVar env = bindEnv var varType env
+
+getVarType :: Variable -> SMTM SExpr
+getVarType var = asks (\env -> lookupEnvU env var)
+
 checkExpr :: Expr u -> IO (Maybe [(String, SMT.Value)])
 checkExpr e = do
   solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< Just <$> SMT.newLogger 0
   unknownNames <- addUnknowns solver unknownCount
-  eResult <- snd . cata (checkExprF solver unknownNames) eFinal $ emptyEnv
+  let (_, checks) = evalRWS (cata checkExprF eFinal) emptyEnv ()
+      checkOne = check solver unknownNames
+  assgnsList <- traverse checkOne checks
   pure $
-    case eResult of
-      Left assgns -> Just assgns
-      _           -> Nothing
+    case catMaybes assgnsList of
+      (assgns:_) -> Just assgns
+      []         -> Nothing
   where (unknownCount, eNumbered) = renumberExpr e
         eFinal = uniquifyExpr eNumbered
-
-check :: Solver -> [String] -> IO (Maybe [(String, SMT.Value)])
-check solver names = do
-  checkRes <- SMT.check solver
-  case (names, checkRes) of
-    ([], SMT.Sat)       -> pure (Just [])
-    (_,  SMT.Sat) -> Just <$> SMT.getConsts solver names
-    _             -> pure Nothing
 
 applyOp :: BinOp -> SExpr -> SExpr -> SExpr
 applyOp Add = SMT.add
@@ -113,63 +159,31 @@ applyOp Neq = (SMT.not .) . SMT.eq
 applyOp And = SMT.and
 applyOp Or  = SMT.or
 
-checkExprF :: Solver
-           -> [String]
-           -> ExprF Int (Env SExpr -> (SExpr, IO (Either [(String, SMT.Value)] SExpr)))
-           -> Env SExpr
-           -> (SExpr, IO (Either [(String, SMT.Value)] SExpr))
-checkExprF _ _ (ConstIntF x)     _   = (SMT.tInt, puree (SMT.int x))
-checkExprF _ _ (ConstBoolF p)    _   = (SMT.tBool, puree (SMT.bool p))
-checkExprF _ _ (BinOpF ev1 op ev2) env = (opType op, applyOp op <<$>> e1 <<*>> e2)
-  where (_, e1) = ev1 env
-        (_, e2) = ev2 env
-checkExprF _ _ (UnknownIntF u)   _   =
-  (SMT.tInt, puree . SMT.Atom . makeIdent "?" . fromIntegral $ u)
-checkExprF _ _ (VarF v@(Variable varName)) env = (lookupEnvU env v, puree . SMT.Atom $ varName)
-checkExprF solver _ (LetF v@(Variable varName) ev1 ev2) env = (t2, action)
-  where (t1, e1) = ev1 env
-        (t2, e2) = ev2 (bindEnv v t1 env)
-        action = do
-          eVarDef <- e1
-          case eVarDef of
-            Left assgns -> pure (Left assgns)
-            Right varDef -> do
-              _ <- SMT.define solver varName t1 varDef
-              e2
-checkExprF solver names (AssertF ev) env = (SMT.tInt, action)
-  where action = do
-          eExpr <- snd (ev env)
-          case eExpr of
-            Left assgns -> pure (Left assgns)
-            Right expr -> do
-              SMT.push solver
-              SMT.assert solver (SMT.not expr)
-              mAssgns <- check solver names
-              SMT.pop solver
-              pure $ maybeToLeft mAssgns (SMT.int 0)
-checkExprF solver _ (IteF ev1 ev2 ev3) env = (t2, action)
-  where (_,  e1) = ev1 env
-        (t2, e2) = ev2 env
-        (_,  e3) = ev3 env
-        action = do
-          eCond <- e1
-          case eCond of
-            Left assgns -> pure . Left $  assgns
-            Right cond -> do
-              -- Then clause: condition is true
-              SMT.push solver
-              SMT.assert solver cond
-              eThen <- e2
-              SMT.pop solver
-
-              -- Else clause: condition is false
-              SMT.push solver
-              SMT.assert solver (SMT.not cond)
-              eElse <- e3
-              SMT.pop solver
-
-              pure $ SMT.ite cond <$> eThen <*> eElse
-        
+checkExprF :: ExprF Int (SMTM (SExpr, SExpr))
+           -> SMTM (SExpr, SExpr)
+checkExprF (ConstIntF x)  = pure (SMT.tInt, SMT.int x)
+checkExprF (ConstBoolF p) = pure (SMT.tBool, SMT.bool p)
+checkExprF (BinOpF ev1 op ev2) = do
+  (_, e1) <- ev1
+  (_, e2) <- ev2
+  pure (opType op, applyOp op e1 e2)
+checkExprF (UnknownIntF u) =
+  pure (SMT.tInt, SMT.Atom . makeIdent "?" . fromIntegral $ u)
+checkExprF (VarF v@(Variable varName)) = do
+  t <- getVarType v
+  pure (t, SMT.Atom varName)
+checkExprF (LetF v@(Variable varName) ev1 ev2) = do
+  (t1, e1) <- ev1
+  withVar v t1 e1 ev2
+checkExprF (AssertF ev) = do
+  (_, e) <- ev
+  tell $ [Check (Assume (SMT.not e) :)]
+  pure (SMT.tInt, SMT.int 0)
+checkExprF (IteF ev1 ev2 ev3) = do
+  (_,  e1) <- ev1
+  (t2, e2) <- withCondition e1 ev2
+  (_,  e3) <- withCondition (SMT.not e1) ev3
+  pure (t2, SMT.ite e1 e2 e3)
 
 maybeToLeft :: Maybe a -> b -> Either a b
 maybeToLeft (Just a) _ = Left a
