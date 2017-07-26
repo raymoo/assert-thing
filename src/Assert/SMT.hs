@@ -37,40 +37,6 @@ fresh = Fresh $ \i -> (i + 1, i)
 renumberExpr :: Expr u -> (Int, Expr Int)
 renumberExpr e = unFresh (traverse (const fresh) e) $ 0
 
-uniqueVar :: Variable -> Env Int -> (Env Int, Variable)
-uniqueVar v@(Variable vName) env = (newEnv, Variable $ makeIdent vName i)
-  where (newEnv, i) = updateEnv 0 (+1) v env
-
--- The first environment keeps track of the next fresh name for each variable
--- The second environment keeps track of the unique name in scope for each variable
-uniquifyExprF :: ExprF u (Env Variable -> Env Int -> (Env Int, Expr u))
-              -> Env Variable
-              -> Env Int
-              -> (Env Int, Expr u)
-uniquifyExprF (ConstIntF x) _ freshes = (freshes, ConstInt x)
-uniquifyExprF (ConstBoolF p) _ freshes = (freshes, ConstBool p)
-uniquifyExprF (BinOpF ev1 op ev2) bindings freshes =
-  let (freshes',  e1) = ev1 bindings freshes
-      (freshes'', e2) = ev2 bindings freshes'
-  in (freshes'', BinOp e1 op e2)
-uniquifyExprF (UnknownIntF u) _ freshes = (freshes, UnknownInt u)
-uniquifyExprF (VarF var) bindings freshes = (freshes, Var $ lookupEnvU bindings var)
-uniquifyExprF (LetF var ev1 ev2) bindings freshes =
-  let (freshes', e1) = ev1 bindings freshes
-      (freshes'', newVar) = uniqueVar var freshes'
-      bindings' = bindEnv var newVar bindings
-      (freshes''', e2) = ev2 bindings' freshes''
-  in (freshes''', Let newVar e1 e2)
-uniquifyExprF (AssertF r ev) bindings freshes = Assert r <$> ev bindings freshes
-uniquifyExprF (IteF ev1 ev2 ev3) bindings freshes =
-  let (freshes', e1) = ev1 bindings freshes
-      (freshes'', e2) = ev2 bindings freshes'
-      (freshes''', e3) = ev3 bindings freshes''
-  in (freshes''', Ite e1 e2 e3)
-
-uniquifyExpr :: Expr u -> Expr u
-uniquifyExpr e = snd (cata uniquifyExprF e emptyEnv emptyEnv)
-
 makeIdent :: String -> Int -> String
 makeIdent s 0 = s
 makeIdent s n = s ++ "-" ++ show n
@@ -115,35 +81,46 @@ check solver names (Check f _) = do
   pure result
   where commands = f []
 
-type SMTM a = RWS (Env SExpr) [Check] () a
+-- | Read environment is (SMT type, variable name in solver)
+type SMTM a = RWS (Env (SExpr, Variable)) [Check] (Env Int) a
 
 -- | Applies a functoin inside the Check constructor
 mapCheck :: (([Command] -> [Command]) -> ([Command] -> [Command]))
          -> Check -> Check
 mapCheck f (Check g r) = Check (f g) r
 
+uniqueVar :: Variable -> SMTM Variable
+uniqueVar v@(Variable vName) = state go
+  where go env = let (newEnv, i) = updateEnv 0 (+1) v env
+                 in (Variable $ makeIdent vName i, newEnv)
+
 withCondition :: SExpr -> SMTM a -> SMTM a
 withCondition cond = censor (map addCondition)
   where addCondition = mapCheck ((Assume cond :) .)
 
 withVar :: Variable -> SExpr -> SExpr -> SMTM a -> SMTM a
-withVar var varType varDef = censor (map addDef) . local addVar
-  where addDef = mapCheck ((Define var varType varDef :) .)
-        addVar env = bindEnv var varType env
+withVar var varType varDef action = do
+  -- Variable as represented in SMT queries
+  smtVar <- uniqueVar var
 
-getVarType :: Variable -> SMTM SExpr
-getVarType var = asks (\env -> lookupEnvU env var)
+  let addDef = mapCheck ((Define smtVar varType varDef :) .)
+      addVar env = bindEnv var (varType, smtVar) env
+
+  censor (map addDef) . local addVar $ action
+
+-- | (SMT type, SMT variable)
+getVar :: Variable -> SMTM (SExpr, Variable)
+getVar var = asks (\env -> lookupEnvU env var)
 
 checkExpr :: Expr u -> IO [([(String, SMT.Value)], Caret)]
 checkExpr e = do
   solver <- SMT.newSolver "z3" ["-smt2","-in"] Nothing
   unknownNames <- addUnknowns solver unknownCount
-  let (_, checks) = evalRWS (cata checkExprF eFinal) emptyEnv ()
+  let (_, checks) = evalRWS (cata checkExprF eNumbered) emptyEnv emptyEnv
       checkOne c@(Check _ r) = (fmap.fmap) (, r) . check solver unknownNames $ c
   assgnsList <- traverse checkOne checks
   pure $ catMaybes assgnsList
   where (unknownCount, eNumbered) = renumberExpr e
-        eFinal = uniquifyExpr eNumbered
 
 applyOp :: BinOp -> SExpr -> SExpr -> SExpr
 applyOp Add = SMT.add
@@ -167,9 +144,9 @@ checkExprF (BinOpF ev1 op ev2) = do
   pure (opType op, applyOp op e1 e2)
 checkExprF (UnknownIntF u) =
   pure (SMT.tInt, SMT.Atom . makeIdent "?" . fromIntegral $ u)
-checkExprF (VarF v@(Variable varName)) = do
-  t <- getVarType v
-  pure (t, SMT.Atom varName)
+checkExprF (VarF v) = do
+  (t, (Variable smtVarName)) <- getVar v
+  pure (t, SMT.Atom smtVarName)
 checkExprF (LetF v ev1 ev2) = do
   (t1, e1) <- ev1
   withVar v t1 e1 ev2
