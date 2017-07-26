@@ -47,7 +47,7 @@ data ExprF u a = ConstIntF Integer
                | LetF Variable a a
                | AssertF Caret a
                | IteF a a a
-               | LetFunF Variable [Variable] a a
+               | LetFunF Variable [Variable] (Expr u) a
                | AppF Variable [a]
   deriving (Show, Functor)
 
@@ -101,6 +101,7 @@ data Value = IntVal Integer
   deriving (Show, Eq)
 
 newtype Env a = Env (HashMap Variable a)
+  deriving (Show)
 
 emptyEnv :: Env a
 emptyEnv = Env HM.empty
@@ -109,8 +110,9 @@ lookupEnv :: Env a -> Variable -> Maybe a
 lookupEnv (Env m) v = HM.lookup v m
 
 -- Unsafe version
-lookupEnvU :: Env a -> Variable -> a
-lookupEnvU env v = fromMaybe (error "Unbound variable") (lookupEnv env v)
+lookupEnvU :: Show a => Env a -> Variable -> a
+lookupEnvU env v@(Variable vName) =
+  fromMaybe (error $ "Unbound variable: " ++ vName) (lookupEnv env v)
 
 bindEnv :: Variable -> a -> Env a -> Env a
 bindEnv v a (Env m) = Env (HM.insert v a m)
