@@ -104,9 +104,12 @@ assertP = do
 ifP :: Parser (Expr ())
 ifP = reserve "if" *> (Ite <$> exprP <*> (reserve "then" *> exprP) <*> (reserve "else" *> exprP))
 
+argListP :: Parser a -> Parser [a]
+argListP p = P.parens $ P.commaSep p
+
 letFunP :: Parser (Expr ())
 letFunP = reserve "fun" *>
-  (LetFun <$> variableP <*> some variableP <*> (P.symbol "=" *> exprP) <*> (reserve "in" *> exprP))
+  (LetFun <$> variableP <*> argListP variableP <*> (P.symbol "=" *> exprP) <*> (reserve "in" *> exprP))
 
 appP :: Parser (Expr ())
-appP = App <$> variableP <*> some exprP
+appP = App <$> variableP <*> argListP exprP
