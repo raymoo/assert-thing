@@ -13,13 +13,11 @@ import qualified SimpleSMT as SMT
 import Data.Functor.Foldable
 
 import Text.Trifecta.Rendering (Caret)
-import qualified Text.Trifecta.Rendering as R
 
 import Control.Monad.Trans.RWS.Strict
 
-import Control.Applicative
 import Control.Monad (void)
-import Data.Foldable (for_)
+import Data.Foldable (for_, traverse_)
 import Data.Maybe (catMaybes)
 
 newtype Fresh a = Fresh { unFresh :: (Int -> (Int, a)) }
@@ -105,9 +103,9 @@ runCommand solver (Assume e) = SMT.assert solver e
 data Check = Check ([Command] -> [Command]) Caret
 
 check :: Solver -> [String] -> Check -> IO (Maybe [(String, SMT.Value)])
-check solver names (Check f r) = do
+check solver names (Check f _) = do
   SMT.push solver
-  traverse (runCommand solver) commands
+  traverse_ (runCommand solver) commands
   checkRes <- SMT.check solver
   result <- case (names, checkRes) of
               ([], SMT.Sat)       -> pure (Just [])
@@ -172,7 +170,7 @@ checkExprF (UnknownIntF u) =
 checkExprF (VarF v@(Variable varName)) = do
   t <- getVarType v
   pure (t, SMT.Atom varName)
-checkExprF (LetF v@(Variable varName) ev1 ev2) = do
+checkExprF (LetF v ev1 ev2) = do
   (t1, e1) <- ev1
   withVar v t1 e1 ev2
 checkExprF (AssertF r ev) = do
@@ -184,19 +182,3 @@ checkExprF (IteF ev1 ev2 ev3) = do
   (t2, e2) <- withCondition e1 ev2
   (_,  e3) <- withCondition (SMT.not e1) ev3
   pure (t2, SMT.ite e1 e2 e3)
-
-maybeToLeft :: Maybe a -> b -> Either a b
-maybeToLeft (Just a) _ = Left a
-maybeToLeft Nothing b  = Right b
-
-puree :: (Applicative f, Applicative g) => a -> f (g a)
-puree = pure . pure
-
-(<<$>>) :: (Functor f, Functor g) => (a -> b) -> f (g a) -> f (g b)
-(<<$>>) = fmap . fmap
-infixl 4 <<$>>
-
-(<<*>>) :: (Applicative f, Applicative g) => f (g (a -> b)) -> f (g a) -> f (g b)
-(<<*>>) = liftA2 (<*>)
-infixl 4 <<*>>
-
