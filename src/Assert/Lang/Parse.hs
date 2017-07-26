@@ -20,6 +20,7 @@ variableStyle =
                     , P._styleLetter = P.alphaNum
                     , P._styleReserved = HS.fromList [ "let"
                                                      , "in"
+                                                     , "fun"
                                                      , "if"
                                                      , "then"
                                                      , "else"
@@ -48,8 +49,10 @@ programP = exprP <* P.eof
 nonBinP :: Parser (Expr ())
 nonBinP = P.parens exprP
           <|> intP
+          <|> P.try appP
           <|> varP
           <|> letP
+          <|> letFunP
           <|> unknownIntP
           <|> assertP
           <|> ifP
@@ -78,17 +81,20 @@ opP = asum . map makeP $ ops
               ]
 
 binOpP :: Parser (Expr ())
-binOpP = BinOp <$> nonBinP <*> opP <*> nonBinP
+binOpP = BinOp <$> nonBinP <*> opP <*> exprP
 
 unknownIntP :: Parser (Expr ())
 unknownIntP = UnknownInt () <$ reserve "?"
 
+variableP :: Parser Variable
+variableP = Variable <$> ident
+
 varP :: Parser (Expr u)
-varP = Var . Variable <$> ident
+varP = Var <$> variableP
 
 letP :: Parser (Expr ())
 letP = reserve "let" *>
-  (Let . Variable <$> ident <*> (P.symbol "=" *> exprP) <*> (reserve "in" *> exprP))
+  (Let <$> variableP <*> (P.symbol "=" *> exprP) <*> (reserve "in" *> exprP))
 
 assertP :: Parser (Expr ())
 assertP = do
@@ -97,3 +103,10 @@ assertP = do
 
 ifP :: Parser (Expr ())
 ifP = reserve "if" *> (Ite <$> exprP <*> (reserve "then" *> exprP) <*> (reserve "else" *> exprP))
+
+letFunP :: Parser (Expr ())
+letFunP = reserve "fun" *>
+  (LetFun <$> variableP <*> some variableP <*> (P.symbol "=" *> exprP) <*> (reserve "in" *> exprP))
+
+appP :: Parser (Expr ())
+appP = App <$> variableP <*> some exprP

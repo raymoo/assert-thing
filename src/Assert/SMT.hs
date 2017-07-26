@@ -81,6 +81,8 @@ check solver names (Check f _) = do
   pure result
   where commands = f []
 
+data SMTFun = SMTFun (Env (SExpr, Variable)) [Variable] (Expr Int)
+
 -- | Read environment is (SMT type, variable name in solver)
 type SMTM a = RWS (Env (SExpr, Variable)) [Check] (Env Int) a
 
@@ -159,3 +161,5 @@ checkExprF (IteF ev1 ev2 ev3) = do
   (t2, e2) <- withCondition e1 ev2
   (_,  e3) <- withCondition (SMT.not e1) ev3
   pure (t2, SMT.ite e1 e2 e3)
+checkExprF (LetFunF _ _ _ _) = error "TODO: checkExpr"
+checkExprF (AppF _ _)        = error "TODO: checkExpr"

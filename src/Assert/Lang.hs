@@ -35,6 +35,8 @@ data Expr u = ConstInt Integer
             | Let Variable (Expr u) (Expr u)
             | Assert Caret (Expr u)
             | Ite (Expr u) (Expr u) (Expr u)
+            | LetFun Variable [Variable] (Expr u) (Expr u)
+            | App Variable [Expr u]
   deriving (Show, Functor, Foldable, Traversable)
 
 data ExprF u a = ConstIntF Integer
@@ -45,6 +47,8 @@ data ExprF u a = ConstIntF Integer
                | LetF Variable a a
                | AssertF Caret a
                | IteF a a a
+               | LetFunF Variable [Variable] a a
+               | AppF Variable [a]
   deriving (Show, Functor)
 
 type instance Base (Expr u) = ExprF u
@@ -58,6 +62,8 @@ instance Recursive (Expr u) where
   project (Let v e1 e2)    = LetF v e1 e2
   project (Assert c e)     = AssertF c e
   project (Ite e1 e2 e3)   = IteF e1 e2 e3
+  project (LetFun v vs body inner)  = LetFunF v vs body inner
+  project (App f args)     = AppF f args
 
 data BinOp = Add
            | Sub
@@ -139,6 +145,7 @@ evalOne (IteF ev1 ev2 ev3)  env =
     BoolVal True  -> ev2 env
     BoolVal False -> ev3 env
     _             -> error "evalOne: type mismatch"
+evalOne _ _ = error "evalOne: Not all expressions supported"
 
 eval :: Expr Integer -> Value
 eval e = cata evalOne e emptyEnv
