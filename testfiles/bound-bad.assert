@@ -1,0 +1,6 @@
+fun bounded(mn, mx, a) = (mn < a) && (a < mx) in
+let x = ? in
+let y = ? in
+  if (x <= y)
+  then (assert (bounded(x + x, y + y, x + y)))
+  else 0

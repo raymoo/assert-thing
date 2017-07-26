@@ -1,0 +1,8 @@
+fun bounded(mn, mx, a) = (mn <= a) && (a <= mx) in
+fun plus(z, w) = z + w in
+fun test(x, y) = bounded(plus(x, x), plus(y, y), plus(x, y)) in
+let x = ? in
+let y = ? in
+  if (x <= y)
+  then assert(test(x, y))
+  else 0
