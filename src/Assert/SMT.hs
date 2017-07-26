@@ -20,6 +20,9 @@ import Control.Monad (void)
 import Data.Foldable (for_, traverse_)
 import Data.Maybe (catMaybes)
 
+mapFst :: (a -> b) -> (a, c) -> (b, c)
+mapFst f (a, b) = (f a, b)
+
 newtype Fresh a = Fresh { unFresh :: (Int -> (Int, a)) }
 
 instance Functor Fresh where
@@ -81,20 +84,22 @@ check solver names (Check f _) = do
   pure result
   where commands = f []
 
-data SMTFun = SMTFun (Env (SExpr, Variable)) [Variable] (Expr Int)
+data SMTFun = SMTFun (Env (SExpr, Variable), Env SMTFun) [Variable] (Expr Int)
+  deriving (Show)
 
 -- | Read environment is (SMT type, variable name in solver)
-type SMTM a = RWS (Env (SExpr, Variable)) [Check] (Env Int) a
+-- State is (Unique var number, reversed list of global commands)
+type SMTM a = RWS (Env (SExpr, Variable), Env SMTFun) [Check] (Env Int, [Command]) a
 
--- | Applies a functoin inside the Check constructor
+-- | Applies a function inside the Check constructor
 mapCheck :: (([Command] -> [Command]) -> ([Command] -> [Command]))
          -> Check -> Check
 mapCheck f (Check g r) = Check (f g) r
 
 uniqueVar :: Variable -> SMTM Variable
 uniqueVar v@(Variable vName) = state go
-  where go env = let (newEnv, i) = updateEnv 0 (+1) v env
-                 in (Variable $ makeIdent vName i, newEnv)
+  where go (env, fEnv) = let (newEnv, i) = updateEnv 0 (+1) v env
+                         in (Variable $ makeIdent vName i, (newEnv, fEnv))
 
 withCondition :: SExpr -> SMTM a -> SMTM a
 withCondition cond = censor (map addCondition)
@@ -105,21 +110,45 @@ withVar var varType varDef action = do
   -- Variable as represented in SMT queries
   smtVar <- uniqueVar var
 
-  let addDef = mapCheck ((Define smtVar varType varDef :) .)
-      addVar env = bindEnv var (varType, smtVar) env
+  let addVar env = bindEnv var (varType, smtVar) env
+      modState (env, comms) = (env, Define smtVar varType varDef : comms)
 
-  censor (map addDef) . local addVar $ action
+  modify modState
+  local (mapFst addVar) $ action
+
+withFun :: Variable -> [Variable] -> Expr Int -> SMTM a -> SMTM a
+withFun fName args body action = do
+  curEnv <- ask
+
+  let smtFun = SMTFun curEnv args body
+      addFun env = bindEnv fName smtFun env
+
+  local (fmap addFun) action
 
 -- | (SMT type, SMT variable)
 getVar :: Variable -> SMTM (SExpr, Variable)
-getVar var = asks (\env -> lookupEnvU env var)
+getVar var = asks (\(env, _) -> lookupEnvU env var)
+
+getFun :: Variable -> SMTM SMTFun
+getFun var = asks (\(_, env) -> lookupEnvU env var)
+
+applyFun :: Variable -> [(SExpr, SExpr)] -> SMTM (SExpr, SExpr)
+applyFun v args = do
+  SMTFun funEnv params body <- getFun v
+  if length args /= length params
+    then error "applyFun: Bad function argument count"
+    else local (const funEnv) . withAll params $ cata checkExprF body
+  where bindOne param (argT, argE) = withVar param argT argE
+        withAll params = foldr (.) id $ zipWith bindOne params args
 
 checkExpr :: Expr u -> IO [([(String, SMT.Value)], Caret)]
 checkExpr e = do
-  solver <- SMT.newSolver "z3" ["-smt2","-in"] Nothing
+  solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< Just <$> SMT.newLogger 0
   unknownNames <- addUnknowns solver unknownCount
-  let (_, checks) = evalRWS (cata checkExprF eNumbered) emptyEnv emptyEnv
+  let (_, (_, globalComms), checks) =
+        runRWS (cata checkExprF eNumbered) (emptyEnv, emptyEnv) (emptyEnv, [])
       checkOne c@(Check _ r) = (fmap.fmap) (, r) . check solver unknownNames $ c
+  traverse_ (runCommand solver) (reverse globalComms)
   assgnsList <- traverse checkOne checks
   pure $ catMaybes assgnsList
   where (unknownCount, eNumbered) = renumberExpr e
@@ -161,5 +190,7 @@ checkExprF (IteF ev1 ev2 ev3) = do
   (t2, e2) <- withCondition e1 ev2
   (_,  e3) <- withCondition (SMT.not e1) ev3
   pure (t2, SMT.ite e1 e2 e3)
-checkExprF (LetFunF _ _ _ _) = error "TODO: checkExpr"
-checkExprF (AppF _ _)        = error "TODO: checkExpr"
+checkExprF (LetFunF fName args body inner) = withFun fName args body inner
+checkExprF (AppF fName argEvs) = do
+  args <- sequence argEvs
+  applyFun fName args
