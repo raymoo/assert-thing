@@ -1,0 +1,6 @@
+fun sum(n) = if n <= 0
+  then let t = 0 - n in
+       let blah = assert(t > 0)
+       in t
+  else n in
+assert(sum(?) >= 0)

@@ -34,6 +34,7 @@ data Expr u = ConstInt Integer
             | Var Variable
             | Let Variable (Expr u) (Expr u)
             | Assert Caret (Expr u)
+            | Believe (Expr u)
             | Ite (Expr u) (Expr u) (Expr u)
             | LetFun Variable [Variable] (Expr u) (Expr u)
             | App Variable [Expr u]
@@ -46,6 +47,7 @@ data ExprF u a = ConstIntF Integer
                | VarF Variable
                | LetF Variable a a
                | AssertF Caret a
+               | BelieveF a
                | IteF a a a
                | LetFunF Variable [Variable] (Expr u) a
                | AppF Variable [a]
@@ -61,6 +63,7 @@ instance Recursive (Expr u) where
   project (Var v)          = VarF v
   project (Let v e1 e2)    = LetF v e1 e2
   project (Assert c e)     = AssertF c e
+  project (Believe e)      = BelieveF e
   project (Ite e1 e2 e3)   = IteF e1 e2 e3
   project (LetFun v vs body inner)  = LetFunF v vs body inner
   project (App f args)     = AppF f args
