@@ -1,0 +1,5 @@
+fun abs(n) = if n < 0 then 0 - n else n in
+let x = ? in
+fun g(h) = h(x) > 0 in
+fun f(n) = abs(n - 5) in
+assert(g(f))

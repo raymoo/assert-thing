@@ -20,8 +20,8 @@ import Control.Monad (void, join)
 import Data.Foldable (for_, traverse_)
 import Data.Maybe (catMaybes)
 
-mapFst :: (a -> b) -> (a, d, c) -> (b, d, c)
-mapFst f (a, d, b) = (f a, d, b)
+mapFst :: (a -> b) -> (a, c) -> (b, c)
+mapFst f (a, c) = (f a, c)
 
 newtype Fresh a = Fresh { unFresh :: (Int -> (Int, a)) }
 
@@ -85,14 +85,29 @@ check solver names (Check f _) = do
   where commands = f []
 
 data SMTFun =
-  SMTFun Variable Int (Env (SExpr, Variable), Env SMTFun, SMT.SExpr) [Variable] (Expr Int)
+  SMTFun Variable Int (Env SMTBinding, SMT.SExpr) [Variable] (Expr Int)
   -- ^ Name, remaining calls (to limit recursion), environment, arguments, body
   deriving (Show)
 
--- | Read environment is (SMT type, variable name in solver, logical context)
+data SMTBinding =
+  VarBinding SExpr Variable
+  | FunctionBinding SMTFun
+  deriving (Show)
+
+data SMTValue =
+  -- type, expression
+  SExprValue SExpr SExpr
+  | FunctionValue SMTFun
+  deriving (Show)
+
+bindingToValue :: SMTBinding -> SMTValue
+bindingToValue (VarBinding t (Variable varName)) = SExprValue t (SMT.Atom varName)
+bindingToValue (FunctionBinding fun) = FunctionValue fun
+
+-- | Read environment is (Binding environment, logical context)
 -- State is (Unique var number, reversed list of global commands)
 type SMTM a =
-  RWS (Env (SExpr, Variable), Env SMTFun, SMT.SExpr) [Check] (Env Int, [Command]) a
+  RWS (Env SMTBinding, SMT.SExpr) [Check] (Env Int, [Command]) a
 
 -- | Applies a function inside the Check constructor
 mapCheck :: (([Command] -> [Command]) -> ([Command] -> [Command]))
@@ -111,42 +126,37 @@ outputGlobalCommand comm = modify modState
 withCondition :: SExpr -> SMTM a -> SMTM a
 withCondition cond = censor (map addCondition) . local addContext
   where addCondition = mapCheck ((Assume cond :) .)
-        addContext (typeEnv, varEnv, context) =
-          (typeEnv, varEnv, SMT.and cond context)
+        addContext = fmap (SMT.and cond)
+
+withBinding :: Variable -> SMTBinding -> SMTM a -> SMTM a
+withBinding var binding action =
+  local (mapFst (bindEnv var binding)) action
 
 withVar :: Variable -> SExpr -> SExpr -> SMTM a -> SMTM a
 withVar var varType varDef action = do
   -- Variable as represented in SMT queries
   smtVar <- uniqueVar var
   outputGlobalCommand $ Define smtVar varType varDef
-
-  let addVar env = bindEnv var (varType, smtVar) env
-  local (mapFst addVar) $ action
+  withBinding var (VarBinding varType smtVar) action
 
 withFun :: Variable -> Int -> [Variable] -> Expr Int -> SMTM a -> SMTM a
 withFun fName recsLeft args body action = do
   curEnv <- ask
 
   let smtFun = SMTFun fName recsLeft curEnv args body
-      addFun env = bindEnv fName smtFun env
-
-  local (\(a, b, c) -> (a, addFun b, c)) action
+  withBinding fName (FunctionBinding smtFun) action
 
 believe :: SMT.SExpr -> SMTM ()
 believe p = do
-  (_, _, context) <- ask
+  (_, context) <- ask
   outputGlobalCommand . Assume $ context `SMT.implies` p
 
--- | (SMT type, SMT variable)
-getVar :: Variable -> SMTM (SExpr, Variable)
-getVar var = asks (\(env, _, _) -> lookupEnvU env var)
+getVar :: Variable -> SMTM SMTBinding
+getVar var = asks (\(env, _) -> lookupEnvU env var)
 
-getFun :: Variable -> SMTM SMTFun
-getFun var = asks (\(_, env, _) -> lookupEnvU env var)
-
-applyFun :: Variable -> [(SExpr, SExpr)] -> SMTM (Maybe (SExpr, SExpr))
+applyFun :: Variable -> [SMTValue] -> SMTM (Maybe SMTValue)
 applyFun v args = do
-  SMTFun fName recsLeft funEnv params body <- getFun v
+  FunctionBinding (SMTFun fName recsLeft funEnv params body) <- getVar v
   if
     | length args /= length params ->
       error "applyFun: Bad function argument count"
@@ -159,14 +169,16 @@ applyFun v args = do
         -- Make the function available to call recursively
         . withFun fName (recsLeft - 1) params body
         $ cata checkExprF body
-  where bindOne param (argT, argE) = withVar param argT argE
+  where bindOne param val = case val of
+          SExprValue t e -> withVar param t e
+          FunctionValue fun -> withBinding param (FunctionBinding fun)
         withAll params = foldr (.) id $ zipWith bindOne params args
 
 checkExpr :: Expr u -> IO [([(String, SMT.Value)], Caret)]
 checkExpr e = do
   solver <- SMT.newSolver "z3" ["-smt2","-in"] =<< Just <$> SMT.newLogger 0
   unknownNames <- addUnknowns solver unknownCount
-  let initEnv = (emptyEnv, emptyEnv, SMT.bool True)
+  let initEnv = (emptyEnv, SMT.bool True)
       (_, (_, globalComms), checks) =
         runRWS (cata checkExprF eNumbered) initEnv (emptyEnv, [])
       checkOne c@(Check _ r) = (fmap.fmap) (, r) . check solver unknownNames $ c
@@ -187,50 +199,58 @@ applyOp Neq = (SMT.not .) . SMT.eq
 applyOp And = SMT.and
 applyOp Or  = SMT.or
 
-checkExprF :: ExprF Int (SMTM (Maybe (SExpr, SExpr)))
-           -> SMTM (Maybe (SExpr, SExpr))
-checkExprF (ConstIntF x)  = (pure.pure) (SMT.tInt, SMT.int x)
-checkExprF (ConstBoolF p) = (pure.pure) (SMT.tBool, SMT.bool p)
+checkExprF :: ExprF Int (SMTM (Maybe SMTValue))
+           -> SMTM (Maybe SMTValue)
+checkExprF (ConstIntF x)  = (pure.pure) (SExprValue SMT.tInt (SMT.int x))
+checkExprF (ConstBoolF p) = (pure.pure) (SExprValue SMT.tBool (SMT.bool p))
 checkExprF (BinOpF ev1 op ev2) = do
   mRes1 <- ev1
   mRes2 <- ev2
-  pure . fmap (opType op,) $ applyOp op <$> fmap snd mRes1 <*> fmap snd mRes2
+  pure $ combine <$> mRes1 <*> mRes2
+  where combine (SExprValue _ e1) (SExprValue _ e2) =
+          SExprValue (opType op) (applyOp op e1 e2)
+        combine _                  _                  = error "Function in binop"
+
 checkExprF (UnknownIntF u) =
-  pure . Just $ (SMT.tInt, SMT.Atom . makeIdent "?" . fromIntegral $ u)
+  pure . Just $ SExprValue SMT.tInt (SMT.Atom . makeIdent "?" . fromIntegral $ u)
 checkExprF (VarF v) = do
-  (t, (Variable smtVarName)) <- getVar v
-  (pure.pure) (t, SMT.Atom smtVarName)
+  Just . bindingToValue <$> getVar v
 checkExprF (LetF v ev1 ev2) = do
   mRes1 <- ev1
   case mRes1 of
     Nothing -> pure Nothing
-    Just (t1, e1) -> do
-      withVar v t1 e1 ev2
+    Just (SExprValue t1 e1) -> withVar v t1 e1 ev2
+    Just (FunctionValue fun) -> withBinding v (FunctionBinding fun) ev1
 checkExprF (AssertF r ev) = do
   mRes <- ev
   case mRes of
     Nothing -> pure Nothing
-    Just (_, e) -> do
+    Just (SExprValue _ e) -> do
       tell $ [Check (Assume (SMT.not e) :) r]
-      (pure.pure) (SMT.tInt, SMT.int 0)
+      (pure.pure) (SExprValue SMT.tInt (SMT.int 0))
+    _ -> error "Tried to assert a function"
 checkExprF (BelieveF ev1) = do
   mRes1 <- ev1
   case mRes1 of
     Nothing -> pure ()
-    Just (_, e) -> believe e
+    Just (SExprValue _ e) -> believe e
+    _                     -> error "Tried to believe a function"
   pure Nothing
 checkExprF (IteF ev1 ev2 ev3) = do
   mRes1 <- ev1
   case mRes1 of
     Nothing -> pure Nothing
-    Just (_, e1) -> do
+    Just (SExprValue _ e1) -> do
       mRes2 <- withCondition e1 ev2
       mRes3 <- withCondition (SMT.not e1) ev3
       merge e1 mRes2 mRes3
-  where merge e1 (Just (t2, e2)) (Just (_,  e3)) = (pure.pure) (t2, SMT.ite e1 e2 e3)
-        merge _ (Just (t2, e2)) Nothing         = (pure.pure) (t2, e2)
-        merge _ Nothing         (Just (t3, e3)) = (pure.pure) (t3, e3)
-        merge _ _               _               = pure Nothing
+    Just _ -> error "Function used as condition"
+  where merge e1 (Just (SExprValue t2 e2)) (Just (SExprValue _  e3)) =
+          (pure.pure) (SExprValue t2 (SMT.ite e1 e2 e3))
+        merge _ (Just a) Nothing         = (pure.pure) a
+        merge _ Nothing         (Just a) = (pure.pure) a
+        merge _ Nothing         Nothing  = pure Nothing
+        merge _ _               _        = error "Function result in condition body"
 checkExprF (LetFunF fName args body inner) = withFun fName recLimit args body inner
   where recLimit = 3
 checkExprF (AppF fName argEvs) = do
